@@ -33,6 +33,8 @@ jobs:
         with:
           path: vendor/ffmpeg-${{ steps.arch.outputs.arch }}
           key: ffmpeg-${{ steps.arch.outputs.arch }}-${{ hashFiles('scripts/build-ffmpeg.sh', 'scripts/ffmpeg-sources.sha256') }}
+      - if: steps.cache.outputs.cache-hit != 'true' && steps.arch.outputs.arch == 'x86_64'
+        run: brew install nasm
       - if: steps.cache.outputs.cache-hit != 'true'
         run: scripts/build-ffmpeg.sh
         env:

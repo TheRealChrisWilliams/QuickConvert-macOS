@@ -24,6 +24,7 @@ SOURCES=(
   "https://storage.googleapis.com/downloads.webmproject.org/releases/webp/libwebp-1.5.0.tar.gz"
 )
 
+[[ "$ARCH" != x86_64 ]] || command -v nasm >/dev/null || { echo "x86_64 builds need nasm (brew install nasm)" >&2; exit 1; }
 mkdir -p "$WORK/src" "$PREFIX" "$OUT/bin" "$OUT/licenses"
 cd "$WORK/src"
 for url in "${SOURCES[@]}"; do
