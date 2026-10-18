@@ -111,11 +111,7 @@ final class Converter: @unchecked Sendable {
         task.standardOutput = output
         task.standardError = errors
         let capture = ProcessCapture(duration: duration, progress: progress)
-        output.fileHandleForReading.readabilityHandler = { capture.append($0.availableData, error: false) }
-        errors.fileHandleForReading.readabilityHandler = { capture.append($0.availableData, error: true) }
         defer {
-            output.fileHandleForReading.readabilityHandler = nil
-            errors.fileHandleForReading.readabilityHandler = nil
             lock.lock()
             process = nil
             lock.unlock()
@@ -128,13 +124,20 @@ final class Converter: @unchecked Sendable {
         lock.unlock()
         do { try task.run() }
         catch { throw ConversionFailure.message("The conversion tool couldn't start. Reinstall QuickConvert and try again.") }
+        // One blocking reader per pipe keeps output in order and drains it to EOF.
+        let drained = DispatchGroup()
+        for (pipe, isError) in [(output, false), (errors, true)] {
+            DispatchQueue.global(qos: .utility).async(group: drained) {
+                let handle = pipe.fileHandleForReading
+                while let data = try? handle.read(upToCount: 65_536), !data.isEmpty {
+                    capture.append(data, error: isError)
+                }
+            }
+        }
         do { try checkCancellation() }
         catch { if task.isRunning { task.terminate() } }
         exited.wait()
-        output.fileHandleForReading.readabilityHandler = nil
-        errors.fileHandleForReading.readabilityHandler = nil
-        capture.append(output.fileHandleForReading.readDataToEndOfFile(), error: false)
-        capture.append(errors.fileHandleForReading.readDataToEndOfFile(), error: true)
+        drained.wait()
         try checkCancellation()
         let (data, details) = capture.snapshot()
         return (task.terminationStatus, data, details)
