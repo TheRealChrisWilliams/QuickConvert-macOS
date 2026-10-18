@@ -1,0 +1,103 @@
+name: macOS build
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      record_checksums:
+        description: Record unpinned FFmpeg source checksums (first run only; review and commit the uploaded file)
+        type: boolean
+        default: false
+
+jobs:
+  test:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - run: swift test
+
+  ffmpeg:
+    strategy:
+      matrix:
+        runner: [macos-15, macos-15-intel]
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: arch
+        run: echo "arch=$(uname -m)" >> "$GITHUB_OUTPUT"
+      - id: cache
+        uses: actions/cache@v4
+        with:
+          path: vendor/ffmpeg-${{ steps.arch.outputs.arch }}
+          key: ffmpeg-${{ steps.arch.outputs.arch }}-${{ hashFiles('scripts/build-ffmpeg.sh', 'scripts/ffmpeg-sources.sha256') }}
+      - if: steps.cache.outputs.cache-hit != 'true'
+        run: scripts/build-ffmpeg.sh
+        env:
+          QC_RECORD_CHECKSUMS: ${{ inputs.record_checksums && '1' || '0' }}
+      - if: inputs.record_checksums
+        uses: actions/upload-artifact@v4
+        with:
+          name: checksums-${{ steps.arch.outputs.arch }}
+          path: scripts/ffmpeg-sources.sha256
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ffmpeg-${{ steps.arch.outputs.arch }}
+          path: vendor/ffmpeg-${{ steps.arch.outputs.arch }}
+
+  package:
+    needs: [test, ffmpeg]
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: ffmpeg-*
+          path: vendor
+      - run: chmod +x vendor/ffmpeg-*/bin/*
+      - name: Package
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then export VERSION="${GITHUB_REF_NAME#v}"; else export VERSION="0.0.0-dev"; fi
+          BUILD="$GITHUB_RUN_NUMBER" scripts/package.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dmg
+          path: |
+            dist/*.dmg
+            dist/*.sha256
+
+  verify:
+    needs: package
+    strategy:
+      matrix:
+        runner: [macos-15, macos-15-intel]
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dmg
+          path: dist
+      - name: Run every conversion path from the mounted DMG
+        run: |
+          (cd dist && shasum -a 256 -c ./*.sha256)
+          hdiutil attach dist/*.dmg -mountpoint /Volumes/QuickConvert -nobrowse
+          /Volumes/QuickConvert/QuickConvert.app/Contents/MacOS/QuickConvert --self-test
+          hdiutil detach /Volumes/QuickConvert
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: verify
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dmg
+          path: dist
+      # Drafts only: a person publishes the release after reviewing it.
+      - run: gh release create "$GITHUB_REF_NAME" dist/* --draft --title "QuickConvert ${GITHUB_REF_NAME#v}" --repo "$GITHUB_REPOSITORY"
+        env:
+          GH_TOKEN: ${{ github.token }}
